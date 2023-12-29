@@ -25,8 +25,8 @@ resource "jumpcloud_user" "john_doe" {
 }
 
 resource "jumpcloud_user_group_membership" "example" {
-  user_id  = jumpcloud_user.john_doe.id
-  group_id = jumpcloud_user_group.example.id
+  userid  = jumpcloud_user.john_doe.id
+  groupid = jumpcloud_user_group.example.id
 }
 ```
 
