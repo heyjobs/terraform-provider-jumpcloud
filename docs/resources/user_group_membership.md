@@ -44,7 +44,10 @@ resource "jumpcloud_user_group_membership" "example" {
 
 ## Import
 Jumpcloud User group memberships can be imported using the concatenated groupid and userid, separated by a '/'. For example:
+```hcl
+  terraform import jumpcloud_user_group_membership.example groupid/userid
 ```
-terraform import jumpcloud_user_group_membership.example_membership groupid/userid
+Example:
+```hcl
+  terraform import jumpcloud_user_group_membership.example 658e7721f7bf1200018c1111/654dfa39849014ce9de81111
 ```
-
