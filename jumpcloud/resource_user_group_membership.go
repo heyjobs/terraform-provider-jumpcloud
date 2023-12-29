@@ -11,58 +11,56 @@ import (
 )
 
 func resourceUserGroupMembership() *schema.Resource {
-	return &schema.Resource{
-		Description:   "Provides a resource for managing user group memberships.",
-		Create: resourceUserGroupMembershipCreate,
-		Read:   resourceUserGroupMembershipRead,
-		// We must not have an update routine as the association cannot be updated.
-		// Any change in one of the elements forces a recreation of the resource
-		Update:        nil,
-		Delete: resourceUserGroupMembershipDelete,
-		Schema: map[string]*schema.Schema{
-			"userid": {
-				Description: "The ID of the `resource_user` object.",
-				Type:        schema.TypeString,
-				Required:    true,
-				ForceNew:    true,
-			},
-			"groupid": {
-				Description: "The ID of the `resource_user_group` object.",
-				Type:        schema.TypeString,
-				Required:    true,
-				ForceNew:    true,
-			},
-		},
-		Importer: &schema.ResourceImporter{
-			State: userGroupMembershipImporter,
-		},
-	}
+    return &schema.Resource{
+        Description:   "Provides a resource for managing user group memberships.",
+        Create:        resourceUserGroupMembershipCreate,
+        Read:          resourceUserGroupMembershipRead,
+        Update:        nil, // No update routine, as association cannot be updated
+        Delete:        resourceUserGroupMembershipDelete,
+        Schema: map[string]*schema.Schema{
+            "userid": {
+                Description: "The ID of the `resource_user` object.",
+                Type:        schema.TypeString,
+                Required:    true,
+                ForceNew:    true,
+            },
+            "groupid": {
+                Description: "The ID of the `resource_user_group` object.",
+                Type:        schema.TypeString,
+                Required:    true,
+                ForceNew:    true,
+            },
+        },
+        Importer: &schema.ResourceImporter{
+            State: userGroupMembershipImporter,
+        },
+    }
 }
 
-// We cannot use the regular importer as it calls the read function ONLY with the ID field being
-// populated.- In our case, we need the group ID and user ID to do the read - But since our
-// artificial resource ID is simply the concatenation of user ID group ID seperated by  a '/',
-// we can derive both values during our import process
 func userGroupMembershipImporter(d *schema.ResourceData, m interface{}) ([]*schema.ResourceData, error) {
-    s := strings.Split(d.Id(), "/")
-    _ = d.Set("groupid", s[0])
-    _ = d.Set("userid", s[1])
+    ids := strings.Split(d.Id(), "/")
+    if len(ids) != 2 {
+        return nil, fmt.Errorf("Invalid import format. Expected 'groupid/userid'")
+    }
+    groupID, userID := ids[0], ids[1]
+
+    _ = d.Set("groupid", groupID)
+    _ = d.Set("userid", userID)
 
     config := m.(*jcapiv2.Configuration)
     client := jcapiv2.NewAPIClient(config)
 
-    // Check if the user is already a member of the group
-    isMember, err := checkUserGroupMembership(client, d.Get("groupid").(string), d.Get("userid").(string))
+    isMember, err := checkUserGroupMembership(client, groupID, userID)
     if err != nil {
         return nil, err
     }
 
     if isMember {
-        d.SetId(d.Get("groupid").(string) + "/" + d.Get("userid").(string))
+        d.SetId(groupID + "/" + userID)
         return []*schema.ResourceData{d}, nil
     }
 
-    return nil, fmt.Errorf("User %s is not a member of group %s", d.Get("userid").(string), d.Get("groupid").(string))
+    return nil, fmt.Errorf("User %s is not a member of group %s", userID, groupID)
 }
 
 func checkUserGroupMembership(client *jcapiv2.APIClient, groupID, userID string) (bool, error) {
@@ -85,12 +83,12 @@ func checkUserGroupMembership(client *jcapiv2.APIClient, groupID, userID string)
             }
         }
 
-        // Break the loop if the number of members in the current batch is less than 100
         if len(graphconnect) < 100 {
             break
+        } else {
+            time.Sleep(100 * time.Millisecond)
         }
     }
-
     return false, nil
 }
 
