@@ -38,3 +38,6 @@ Export `JUMPCLOUD_ORG_ID` to set it.
 
 ## Run tests
 `ex: go test -v ./... -run TestAccDataSourceJumpCloudUserGroup_basic`
+
+### OpenTofu
+Link: https://github.com/opentofu/registry/tree/main/providers/c/cheelim1
