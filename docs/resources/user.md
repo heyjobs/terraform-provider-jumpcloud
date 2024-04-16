@@ -14,11 +14,12 @@ Provides a JumpCloud system user resource. For additional information refer also
 
 ```terraform
 resource "jumpcloud_user" "john_doe" {
-  username   = "john.doe"
-  email      = "john.doe@acme.org"
-  firstname  = "John Smith"
-  lastname   = "Doe"
-  enable_mfa = true
+  username      = "john.doe"
+  email         = "john.doe@acme.org"
+  firstname     = "John"
+  lastname      = "Doe"
+  display_name  = "John Doe"
+  enable_mfa    = true
 }
 
 output "userid" {
@@ -39,6 +40,7 @@ output "userid" {
 - `enable_mfa` (Boolean) Require Multi-factor Authentication on the User Portal.
 - `firstname` (String) The user's first name. Example: `john`.
 - `lastname` (String) The user's last name. Example: `doe`.
+- `display_name` (String) The user's display name. Example: `john doe`.
 - `ldap_binding_user` (Boolean)
 - `password` (String)
 - `password_never_expires` (Boolean)

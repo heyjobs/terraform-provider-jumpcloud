@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+
 	"github.com/hashicorp/terraform-plugin-sdk/helper/validation"
 
 	jcapiv1 "github.com/TheJumpCloud/jcapi-go/v1"
@@ -31,6 +32,10 @@ func resourceUser() *schema.Resource {
 				Optional: true,
 			},
 			"lastname": {
+				Type:     schema.TypeString,
+				Optional: true,
+			},
+			"display_name": {
 				Type:     schema.TypeString,
 				Optional: true,
 			},
@@ -119,6 +124,7 @@ func resourceUserCreate(d *schema.ResourceData, m interface{}) error {
 		Email:                       d.Get("email").(string),
 		Firstname:                   d.Get("firstname").(string),
 		Lastname:                    d.Get("lastname").(string),
+		Displayname:                 d.Get("display_name").(string),
 		Password:                    d.Get("password").(string),
 		EnableUserPortalMultifactor: d.Get("enable_mfa").(bool),
 		LdapBindingUser:             d.Get("ldap_binding_user").(bool),
@@ -170,6 +176,9 @@ func resourceUserRead(d *schema.ResourceData, m interface{}) error {
 	if err := d.Set("lastname", res.Lastname); err != nil {
 		return err
 	}
+	if err := d.Set("display_name", res.Displayname); err != nil {
+		return err
+	}
 	if err := d.Set("enable_mfa", res.EnableUserPortalMultifactor); err != nil {
 		return err
 	}
@@ -209,6 +218,7 @@ func resourceUserUpdate(d *schema.ResourceData, m interface{}) error {
 		Email:                       d.Get("email").(string),
 		Firstname:                   d.Get("firstname").(string),
 		Lastname:                    d.Get("lastname").(string),
+		Displayname:                 d.Get("display_name").(string),
 		Password:                    d.Get("password").(string),
 		EnableUserPortalMultifactor: d.Get("enable_mfa").(bool),
 		LdapBindingUser:             d.Get("ldap_binding_user").(bool),
