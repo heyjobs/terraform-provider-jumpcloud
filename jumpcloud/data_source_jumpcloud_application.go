@@ -51,7 +51,7 @@ func dataSourceJumpCloudApplicationRead(d *schema.ResourceData, m interface{}) e
 
 	for _, application := range applications {
 		log.Printf("[DEBUG] Checking application with DisplayName: %s, DisplayLabel: %s\n", application.DisplayName, application.DisplayLabel)
-		
+
 		if (nameExists && application.DisplayName == applicationName) || (displayLabelExists && application.DisplayLabel == displayLabel) {
 			d.SetId(application.Id)
 			return nil

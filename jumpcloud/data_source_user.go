@@ -37,14 +37,12 @@ func getUserDetails(client *jcapiv1.APIClient, email string) (*jcapiv1.Systemuse
 	filterJson := fmt.Sprintf("[{\"email\": \"%s\"}]", email)
 	var filter interface{}
 	json.Unmarshal([]byte(filterJson), &filter)
-	
+
 	optionals := map[string]interface{}{
 		"body": jcapiv1.Search{
 			Filter: &filter,
 		},
 	}
-	
-	
 
 	res, _, err := client.SearchApi.SearchSystemusersPost(ctx, contentType, accept, optionals)
 	if err != nil {
@@ -61,7 +59,6 @@ func getUserDetails(client *jcapiv1.APIClient, email string) (*jcapiv1.Systemuse
 
 	return &user, nil
 }
-
 
 func dataSourceJumpCloudUserRead(d *schema.ResourceData, m interface{}) error {
 	configv1 := convertV2toV1Config(m.(*jcapiv2.Configuration))

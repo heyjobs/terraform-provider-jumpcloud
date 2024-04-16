@@ -211,14 +211,11 @@ func resourceUserUpdate(d *schema.ResourceData, m interface{}) error {
 		return err
 	}
 
-	// The code from the create function is almost identical, but the structure is different :
-	// jcapiv1.Systemuserput != jcapiv1.Systemuserputpost
 	payload := jcapiv1.Systemuserput{
 		Username:                    d.Get("username").(string),
 		Email:                       d.Get("email").(string),
 		Firstname:                   d.Get("firstname").(string),
 		Lastname:                    d.Get("lastname").(string),
-		Displayname:                 d.Get("display_name").(string),
 		Password:                    d.Get("password").(string),
 		EnableUserPortalMultifactor: d.Get("enable_mfa").(bool),
 		LdapBindingUser:             d.Get("ldap_binding_user").(bool),
@@ -226,6 +223,15 @@ func resourceUserUpdate(d *schema.ResourceData, m interface{}) error {
 		Suspended:                   d.Get("suspended").(bool),
 		PasswordNeverExpires:        d.Get("password_never_expires").(bool),
 		PhoneNumbers:                phoneNumbers,
+	}
+
+	// Dynamically set the display name if there's a change
+	if d.HasChange("display_name") {
+		if displayName, ok := d.GetOk("display_name"); ok {
+			payload.Displayname = displayName.(string)
+		} else {
+			payload.Displayname = "" // Clear display name if not provided in the config
+		}
 	}
 
 	req := map[string]interface{}{
