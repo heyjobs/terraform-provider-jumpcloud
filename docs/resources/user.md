@@ -16,9 +16,9 @@ Provides a JumpCloud system user resource. For additional information refer also
 resource "jumpcloud_user" "john_doe" {
   username      = "john.doe"
   email         = "john.doe@acme.org"
-  firstname     = "John Smith"
+  firstname     = "John"
   lastname      = "Doe"
-  display_name  = "John Smith"
+  display_name  = "John Doe"
   enable_mfa    = true
 }
 
