@@ -12,10 +12,10 @@ import (
 func resourceUserGroupAssociation() *schema.Resource {
 	return &schema.Resource{
 		Description: "Provides a resource for associating a JumpCloud user group to objects like SSO applications, G Suite, Office 365, LDAP and more.",
-		Create:       resourceUserGroupAssociationCreate,
-		Read:         resourceUserGroupAssociationRead,
-		Update:       nil,
-		Delete:       resourceUserGroupAssociationDelete,
+		Create:      resourceUserGroupAssociationCreate,
+		Read:        resourceUserGroupAssociationRead,
+		Update:      nil,
+		Delete:      resourceUserGroupAssociationDelete,
 		Schema: map[string]*schema.Schema{
 			"group_id": {
 				Description: "The ID of the `resource_user_group` resource.",
@@ -59,7 +59,6 @@ func resourceUserGroupAssociation() *schema.Resource {
 	}
 }
 
-
 func modifyUserGroupAssociation(client *jcapiv2.APIClient,
 	d *schema.ResourceData, action string) diag.Diagnostics {
 
@@ -89,7 +88,6 @@ func resourceUserGroupAssociationCreate(d *schema.ResourceData, meta interface{}
 	}
 	return resourceUserGroupAssociationRead(d, meta)
 }
-
 
 func resourceUserGroupAssociationRead(d *schema.ResourceData, meta interface{}) error {
 	config := meta.(*jcapiv2.Configuration)

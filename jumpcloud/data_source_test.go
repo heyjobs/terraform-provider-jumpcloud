@@ -7,7 +7,7 @@ import (
 	// "github.com/hashicorp/terraform-plugin-sdk/v2/helper/resource"
 )
 
-//Make sure to replace "your-jumpcloud-api-key" with your actual JumpCloud API key.
+// Make sure to replace "your-jumpcloud-api-key" with your actual JumpCloud API key.
 const testConfig = `
 provider "jumpcloud" {
   # Configure your JumpCloud API key
@@ -21,9 +21,9 @@ data "jumpcloud_user" "test" {
 
 func TestAccDataSourceJumpCloudUser(t *testing.T) {
 	resource.Test(t, resource.TestCase{
-		PreCheck:          func() { testAccPreCheck(t) },
+		PreCheck:     func() { testAccPreCheck(t) },
 		Providers:    testAccProviders,
-		CheckDestroy:      nil,
+		CheckDestroy: nil,
 		Steps: []resource.TestStep{
 			{
 				Config: testConfig,

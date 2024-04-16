@@ -12,9 +12,9 @@ func TestAccUserGroupAssociation(t *testing.T) {
 	randSuffix := acctest.RandStringFromCharSet(10, acctest.CharSetAlpha)
 
 	resource.Test(t, resource.TestCase{
-		PreCheck:           func() { testAccPreCheck(t) },
-		Providers: testAccProviders,
-		CheckDestroy:      nil,
+		PreCheck:     func() { testAccPreCheck(t) },
+		Providers:    testAccProviders,
+		CheckDestroy: nil,
 		Steps: []resource.TestStep{
 			{
 				Config: testUserGroupAssocConfig(randSuffix),
