@@ -226,16 +226,16 @@ func resourceUserUpdate(d *schema.ResourceData, m interface{}) error {
 	}
 
 	// Dynamically set the display name if there's a change
-    if d.HasChange("display_name") {
-        _, ok := d.GetOk("display_name")
-        if !ok {
-            // The attribute was removed from the configuration, so we explicitly clear it.
-            payload.Displayname = ""
-        } else {
-            // The attribute has a new value.
-            payload.Displayname = d.Get("display_name").(string)
-        }
-    }
+	if d.HasChange("display_name") {
+		_, ok := d.GetOk("display_name")
+		if !ok {
+			// The attribute was removed from the configuration, so we explicitly clear it.
+			payload.Displayname = ""
+		} else {
+			// The attribute has a new value.
+			payload.Displayname = d.Get("display_name").(string)
+		}
+	}
 
 	req := map[string]interface{}{
 		"body": payload,
