@@ -34,5 +34,6 @@ resource "jumpcloud_user_group_association" "example" {
 ### Read-Only
 
 - `id` (String) The ID of this resource.
+- `members` (Map of String) This is a set of user emails associated with this group
 
 

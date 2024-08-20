@@ -20,6 +20,14 @@ func dataSourceJumpCloudUserGroup() *schema.Resource {
 				Type:     schema.TypeString,
 				Computed: true,
 			},
+			"members": {
+				Type:        schema.TypeList,
+				Computed:    true,
+				Description: "This is a set of user emails associated with this group",
+				Elem: &schema.Schema{
+					Type: schema.TypeString,
+				},
+			},
 		},
 	}
 }
@@ -46,6 +54,18 @@ func dataSourceJumpCloudUserGroupRead(d *schema.ResourceData, m interface{}) err
 	for _, group := range groups {
 		if group.Name == groupName {
 			d.SetId(group.Id)
+
+			memberIDs, err := getUserGroupMemberIDs(client, d.Id())
+			if err != nil {
+				return err
+			}
+			memberEmails, err := userIDsToEmails(config, memberIDs)
+			if err != nil {
+				return err
+			}
+			if err := d.Set("members", memberEmails); err != nil {
+				return err
+			}
 			return nil
 		}
 	}
