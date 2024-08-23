@@ -1,6 +1,6 @@
 module github.com/cheelim1/terraform-provider-jumpcloud
 
-go 1.18
+go 1.21
 
 require (
 	github.com/TheJumpCloud/jcapi-go v3.0.0+incompatible
