@@ -32,6 +32,7 @@ output "group_id" {
 ### Optional
 
 - `attributes` (Map of String)
+- `members` (Map of String) This is a set of user emails associated with this group
 
 ### Read-Only
 

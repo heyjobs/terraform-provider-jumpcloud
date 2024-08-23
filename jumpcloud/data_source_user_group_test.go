@@ -21,6 +21,9 @@ func TestAccDataSourceJumpCloudUserGroup_basic(t *testing.T) {
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttrSet("data.jumpcloud_user_group.test_group", "id"),
 					resource.TestCheckResourceAttr("data.jumpcloud_user_group.test_group", "group_name", rName),
+					resource.TestCheckResourceAttr("data.jumpcloud_user_group.test_group", "members.#", "2"),
+					resource.TestCheckResourceAttr("data.jumpcloud_user_group.test_group", "members.0", fmt.Sprintf("%s1@testorg.com", rName)),
+					resource.TestCheckResourceAttr("data.jumpcloud_user_group.test_group", "members.1", fmt.Sprintf("%s3@testorg.com", rName)),
 				),
 			},
 		},
@@ -29,8 +32,35 @@ func TestAccDataSourceJumpCloudUserGroup_basic(t *testing.T) {
 
 func testAccDataSourceJumpCloudUserGroupConfig(groupName string) string {
 	return fmt.Sprintf(`
+resource "jumpcloud_user" "test_user1" {
+  username = "%[1]s1"
+  email = "%[1]s1@testorg.com"
+  firstname = "Firstname"
+  lastname = "Lastname"
+  enable_mfa = true
+}
+resource "jumpcloud_user" "test_user2" {
+  username = "%[1]s2"
+  email = "%[1]s2@testorg.com"
+  firstname = "Firstname"
+  lastname = "Lastname"
+  enable_mfa = true
+}
+resource "jumpcloud_user" "test_user3" {
+  username = "%[1]s3"
+  email = "%[1]s3@testorg.com"
+  firstname = "Firstname"
+  lastname = "Lastname"
+  enable_mfa = true
+}
+
 resource "jumpcloud_user_group" "test_group" {
-  name = "%s"
+  name = "%[1]s"
+
+  members = [
+    jumpcloud_user.test_user1.email,
+    jumpcloud_user.test_user3.email,
+  ]
 }
 
 data "jumpcloud_user_group" "test_group" {
