@@ -34,3 +34,13 @@ resource "jumpcloud_user_group_association" "example" {
 - `id` (String) The ID of this resource.
 
 
+## Import
+Jumpcloud User group association can be imported using the concatenated groupid and userid and type, separated by a '/'. For example:
+```hcl
+  terraform import jumpcloud_user_group_association.example <group_id>/<object_id>/<type>
+
+```
+Example:
+```hcl
+  terraform import jumpcloud_user_group_association.example 5c12345d6e7f8a9b0c1d2e3f/6a78901b2c3d4e5f6a7b8c9d/application
+```
