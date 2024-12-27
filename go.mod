@@ -1,4 +1,4 @@
-module github.com/cheelim1/terraform-provider-jumpcloud
+module github.com/heyjobs/heyjobs-terraform-provider-jumpcloud
 
 go 1.21
 
