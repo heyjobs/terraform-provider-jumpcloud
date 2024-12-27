@@ -1,7 +1,8 @@
 package main
 
 import (
-	"github.com/cheelim1/terraform-provider-jumpcloud/jumpcloud"
+	// "github.com/cheelim1/terraform-provider-jumpcloud/jumpcloud"
+	"github.com/heyjobs/heyjobs-terraform-provider-jumpcloud/jumpcloud"
 	"github.com/hashicorp/terraform-plugin-sdk/plugin"
 	"github.com/hashicorp/terraform-plugin-sdk/terraform"
 )
