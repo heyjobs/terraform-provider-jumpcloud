@@ -1,37 +1,64 @@
-name: release
+name: Release
+
 on:
   push:
-    tags:
-      - 'v*'
-permissions:
-  contents: write
+    branches:
+      - main
+
 jobs:
-  goreleaser:
+  release:
+    name: Release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v2
 
-      - name: Set up Go
-        uses: actions/setup-go@v4
-        with:
-          go-version: '1.21'
+      - name: Get Version from CHANGELOG
+        id: changelog
+        run: |
+          # Ensure CHANGELOG.md exists
+          if [ ! -f "CHANGELOG.md" ]; then
+            echo "CHANGELOG.md not found!" >&2
+            exit 1
+          fi
 
-      - name: Import GPG key
-        uses: crazy-max/ghaction-import-gpg@v5
-        id: import_gpg
+          # Parse the first '##' line to extract the version
+          VERSION=$(grep -oP '^## \K[0-9]+\.[0-9]+\.[0-9]+' CHANGELOG.md | head -n 1)
+
+          if [ -z "$VERSION" ]; then
+            echo "No version found in CHANGELOG.md!" >&2
+            exit 1
+          fi
+
+          echo "Parsed version: $VERSION"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Check for CHANGELOG Diff
+        run: |
+          if ! git diff --exit-code --name-only origin/main -- CHANGELOG.md; then
+            echo "No changes detected in CHANGELOG.md. Please update the changelog." >&2
+            exit 1
+          fi
+
+      - name: Configure Git
+        run: |
+          AUTHOR_NAME=$(git log -1 --pretty=format:'%an')
+          AUTHOR_EMAIL=$(git log -1 --pretty=format:'%ae')
+          git config --global user.name "$AUTHOR_NAME"
+          git config --global user.email "$AUTHOR_EMAIL"
+
+      - name: Create Release Tag
+        id: tag
+        run: |
+          TAG="${{ steps.changelog.outputs.version }}"
+          git tag -a "$TAG" -m "Release $TAG"
+          git push origin "$TAG"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: ncipollo/release-action@v1
         with:
-          gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
-          passphrase: ${{ secrets.PASSPHRASE }}
-      
-      - name: Clean dist directory
-        run: rm -rf dist/
-      
-      - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v4
-        with:
-          version: latest
-          args: release
-        env:
-          GPG_FINGERPRINT: ${{ steps.import_gpg.outputs.fingerprint }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          tag: ${{ steps.tag.outputs.tag }}
+          generateReleaseNotes: true
+          makeLatest: true
