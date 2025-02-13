@@ -26,7 +26,7 @@ terraform {
 }
 
 provider "jumpcloud" {
-  api_key = "test"
+  api_key = "xxxxx"
 }
 ```
 
