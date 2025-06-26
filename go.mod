@@ -1,6 +1,8 @@
 module github.com/heyjobs/heyjobs-terraform-provider-jumpcloud
 
-go 1.21
+go 1.23.0
+
+toolchain go1.24.4
 
 require (
 	github.com/TheJumpCloud/jcapi-go v3.0.0+incompatible
@@ -8,7 +10,7 @@ require (
 	github.com/hashicorp/terraform-plugin-docs v0.14.1
 	github.com/hashicorp/terraform-plugin-sdk v1.13.1
 	github.com/hashicorp/terraform-plugin-sdk/v2 v2.26.1
-	golang.org/x/net v0.8.0
+	golang.org/x/net v0.21.0
 )
 
 require (
@@ -81,11 +83,11 @@ require (
 	github.com/zclconf/go-cty v1.13.1 // indirect
 	github.com/zclconf/go-cty-yaml v1.0.1 // indirect
 	go.opencensus.io v0.24.0 // indirect
-	golang.org/x/crypto v0.7.0 // indirect
-	golang.org/x/mod v0.8.0 // indirect
+	golang.org/x/crypto v0.39.0 // indirect
+	golang.org/x/mod v0.25.0 // indirect
 	golang.org/x/oauth2 v0.4.0 // indirect
-	golang.org/x/sys v0.6.0 // indirect
-	golang.org/x/text v0.8.0 // indirect
+	golang.org/x/sys v0.33.0 // indirect
+	golang.org/x/text v0.26.0 // indirect
 	golang.org/x/xerrors v0.0.0-20220907171357-04be3eba64a2 // indirect
 	google.golang.org/api v0.103.0 // indirect
 	google.golang.org/appengine v1.6.7 // indirect
