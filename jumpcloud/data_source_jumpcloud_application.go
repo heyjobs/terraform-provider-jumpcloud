@@ -41,21 +41,45 @@ func dataSourceJumpCloudApplicationRead(d *schema.ResourceData, m interface{}) e
 		return fmt.Errorf("either name or display_label must be provided")
 	}
 
-	applicationsResponse, _, err := client.ApplicationsApi.ApplicationsList(context.Background(), "_id, displayName, displayLabel", "", nil)
+	pageSize := int32(100)
+	var skip int32 = 0
 
-	if err != nil {
-		return err
-	}
-
-	applications := applicationsResponse.Results
-
-	for _, application := range applications {
-		log.Printf("[DEBUG] Checking application with DisplayName: %s, DisplayLabel: %s\n", application.DisplayName, application.DisplayLabel)
-
-		if (nameExists && application.DisplayName == applicationName) || (displayLabelExists && application.DisplayLabel == displayLabel) {
-			d.SetId(application.Id)
-			return nil
+	for {
+		optionalParams := map[string]interface{}{
+			"limit": pageSize,
+			"skip":  skip,
 		}
+
+		// Fetch a page of applications
+		appsResponse, _, err := client.ApplicationsApi.ApplicationsList(
+			context.Background(),
+			"_id, displayName, displayLabel",
+			"",
+			optionalParams,
+		)
+		if err != nil {
+			return fmt.Errorf("failed to list applications: %w", err)
+		}
+
+		results := appsResponse.Results
+		log.Printf("[DEBUG] Retrieved %d applications (skip=%d limit=%d)", len(results), skip, pageSize)
+
+		// Check for matching application in this page
+		for _, application := range results {
+			log.Printf("[DEBUG] Checking application ID=%s DisplayName=%s DisplayLabel=%s",
+				application.Id, application.DisplayName, application.DisplayLabel)
+
+			if (nameExists && application.DisplayName == applicationName) ||
+				(displayLabelExists && application.DisplayLabel == displayLabel) {
+				d.SetId(application.Id)
+				return nil
+			}
+		}
+		if len(results) < int(pageSize) {
+			break
+		}
+
+		skip += pageSize
 	}
 
 	return fmt.Errorf("no application found with the provided filters")
