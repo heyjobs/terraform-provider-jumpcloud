@@ -2,7 +2,7 @@ module github.com/heyjobs/heyjobs-terraform-provider-jumpcloud
 
 go 1.24.0
 
-toolchain go1.24.4
+toolchain go1.25.3
 
 require (
 	github.com/TheJumpCloud/jcapi-go v3.0.0+incompatible
