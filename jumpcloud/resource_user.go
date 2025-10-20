@@ -90,6 +90,14 @@ func resourceUser() *schema.Resource {
 					},
 				},
 			},
+			"groups": {
+				Type:        schema.TypeSet,
+				Optional:    true,
+				Description: "Set of group IDs this user belongs to",
+				Elem: &schema.Schema{
+					Type: schema.TypeString,
+				},
+			},
 			// Currently, only the options necessary for our use case are implemented
 			// JumpCloud offers a lot more
 		},
@@ -143,6 +151,24 @@ func resourceUserCreate(d *schema.ResourceData, m interface{}) error {
 		return err
 	}
 	d.SetId(returnstruc.Id)
+
+	// Sync group memberships if groups are specified
+	if v, ok := d.GetOk("groups"); ok {
+		groupsSet := v.(*schema.Set)
+		newGroupIDs := make([]string, groupsSet.Len())
+		for i, groupID := range groupsSet.List() {
+			newGroupIDs[i] = groupID.(string)
+		}
+
+		configv2 := m.(*jcapiv2.Configuration)
+		clientv2 := jcapiv2.NewAPIClient(configv2)
+
+		// Sync from empty list to the desired groups
+		if err := syncUserGroups(clientv2, returnstruc.Id, []string{}, newGroupIDs); err != nil {
+			return err
+		}
+	}
+
 	return resourceUserRead(d, m)
 }
 
@@ -199,6 +225,17 @@ func resourceUserRead(d *schema.ResourceData, m interface{}) error {
 		return err
 	}
 
+	// Fetch user's group memberships using v2 API
+	configv2 := m.(*jcapiv2.Configuration)
+	clientv2 := jcapiv2.NewAPIClient(configv2)
+	groupIDs, err := getUserGroupIDs(clientv2, d.Id())
+	if err != nil {
+		return err
+	}
+	if err := d.Set("groups", groupIDs); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -246,6 +283,31 @@ func resourceUserUpdate(d *schema.ResourceData, m interface{}) error {
 	if err != nil {
 		return err
 	}
+
+	// Sync group memberships if groups field has changed
+	if d.HasChange("groups") {
+		configv2 := m.(*jcapiv2.Configuration)
+		clientv2 := jcapiv2.NewAPIClient(configv2)
+
+		oldGroups, newGroups := d.GetChange("groups")
+
+		oldGroupsSet := oldGroups.(*schema.Set)
+		oldGroupIDs := make([]string, oldGroupsSet.Len())
+		for i, groupID := range oldGroupsSet.List() {
+			oldGroupIDs[i] = groupID.(string)
+		}
+
+		newGroupsSet := newGroups.(*schema.Set)
+		newGroupIDs := make([]string, newGroupsSet.Len())
+		for i, groupID := range newGroupsSet.List() {
+			newGroupIDs[i] = groupID.(string)
+		}
+
+		if err := syncUserGroups(clientv2, d.Id(), oldGroupIDs, newGroupIDs); err != nil {
+			return err
+		}
+	}
+
 	return resourceUserRead(d, m)
 }
 
