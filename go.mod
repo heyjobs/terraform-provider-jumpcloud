@@ -15,7 +15,7 @@ require (
 
 replace (
 	github.com/hashicorp/terraform-exec => github.com/hashicorp/terraform-exec v0.24.0
-	github.com/spf13/afero => github.com/spf13/afero v1.2.2
+	github.com/spf13/afero => github.com/spf13/afero v1.15.0
 )
 
 require (
