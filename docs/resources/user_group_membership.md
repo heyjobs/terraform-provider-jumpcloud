@@ -10,6 +10,8 @@ description: |-
 
 Provides a resource for managing user group memberships.
 
+> **Note:** Consider using the `groups` field on the [`jumpcloud_user`](user.md) resource instead, which provides a user-centric approach to managing group memberships. This resource remains fully supported but the new approach may be simpler for many use cases. See the [Migration Guide](../../MIGRATION_GUIDE.md) for details.
+
 ## Example Usage
 ```terraform
 resource "jumpcloud_user_group" "example" {

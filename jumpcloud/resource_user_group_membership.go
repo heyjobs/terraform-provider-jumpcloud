@@ -12,11 +12,17 @@ import (
 
 func resourceUserGroupMembership() *schema.Resource {
 	return &schema.Resource{
-		Description: "Provides a resource for managing user group memberships.",
-		Create:      resourceUserGroupMembershipCreate,
-		Read:        resourceUserGroupMembershipRead,
-		Update:      nil, // No update routine, as association cannot be updated
-		Delete:      resourceUserGroupMembershipDelete,
+		Description: "Provides a resource for managing user group memberships. " +
+			"**Note:** Consider using the `groups` field on the `jumpcloud_user` resource instead, " +
+			"which provides a user-centric approach to managing group memberships. " +
+			"See the jumpcloud_user resource documentation for more information and migration guidance.",
+		DeprecationMessage: "This resource is not deprecated but there is now an alternative approach. " +
+			"Consider using the 'groups' field on the jumpcloud_user resource for a simpler, " +
+			"user-centric approach to managing group memberships. See MIGRATION_GUIDE.md for details.",
+		Create: resourceUserGroupMembershipCreate,
+		Read:   resourceUserGroupMembershipRead,
+		Update: nil, // No update routine, as association cannot be updated
+		Delete: resourceUserGroupMembershipDelete,
 		Schema: map[string]*schema.Schema{
 			"userid": {
 				Description: "The ID of the `resource_user` object.",
