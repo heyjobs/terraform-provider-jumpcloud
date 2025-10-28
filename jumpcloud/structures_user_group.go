@@ -10,10 +10,12 @@ import (
 	jcapiv2 "github.com/TheJumpCloud/jcapi-go/v2"
 )
 
-func flattenAttributes(attr *jcapiv2.UserGroupAttributes) map[string]interface{} {
-	return map[string]interface{}{
-		"posix_groups": flattenPosixGroups(attr.PosixGroups),
-		// "enable_samba": fmt.Sprintf("%t", attr.SambaEnabled),
+func flattenAttributes(attr *jcapiv2.UserGroupAttributes) []interface{} {
+	return []interface{}{
+		map[string]interface{}{
+			"posix_groups": flattenPosixGroups(attr.PosixGroups),
+			// "enable_samba": fmt.Sprintf("%t", attr.SambaEnabled),
+		},
 	}
 }
 
@@ -29,7 +31,12 @@ func expandAttributes(attr interface{}) (out *jcapiv2.UserGroupAttributes, ok bo
 	if attr == nil {
 		return
 	}
-	mapAttr, ok := attr.(map[string]interface{})
+	// Handle list input (TypeList with MaxItems: 1)
+	listAttr, ok := attr.([]interface{})
+	if !ok || len(listAttr) == 0 {
+		return
+	}
+	mapAttr, ok := listAttr[0].(map[string]interface{})
 	if !ok {
 		return
 	}
