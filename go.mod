@@ -6,7 +6,7 @@ toolchain go1.25.3
 
 require (
 	github.com/TheJumpCloud/jcapi-go v3.0.0+incompatible
-	github.com/go-resty/resty/v2 v2.16.5
+	github.com/go-resty/resty/v2 v2.17.1
 	github.com/hashicorp/terraform-plugin-docs v0.24.0
 	github.com/hashicorp/terraform-plugin-sdk/v2 v2.38.1
 	golang.org/x/net v0.46.0
