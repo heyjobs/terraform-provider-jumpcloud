@@ -1,0 +1,12 @@
+jumpcloud_users:
+  - name: developer@example.com
+    groups:
+      - Datadog - Users
+      - PagerDuty - Users
+      - aws-web_staging-developer
+  - name: admin@example.com
+    groups:
+      - Datadog - Users
+      - PagerDuty - Users
+      - aws-web_staging-admin
+      - aws-web_production-admin
