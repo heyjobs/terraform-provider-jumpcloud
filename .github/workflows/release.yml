@@ -24,6 +24,10 @@ jobs:
           gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
           passphrase: ${{ secrets.PASSPHRASE }}
 
+      - name: Setup Aikido Safe Chain
+        run: |
+          curl -fsSL https://github.com/AikidoSec/safe-chain/releases/download/1.4.7/install-safe-chain.sh | sh -s -- --ci
+
       - name: Clean dist directory
         run: rm -rf dist/
 
