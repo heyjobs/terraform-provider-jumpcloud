@@ -1,8 +1,13 @@
 package jumpcloud
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
+
+	jcapiv2 "github.com/TheJumpCloud/jcapi-go/v2"
 )
 
 // TestGroupOperationStructure tests that groupOperation struct is properly defined
@@ -256,6 +261,64 @@ func TestChannelCommunication(t *testing.T) {
 
 	if len(results) != len(expected) {
 		t.Errorf("Expected %d results, got %d", len(expected), len(results))
+	}
+}
+
+// TestGroupLookupWorkerFindsGroupBeyondFirstResult is a regression test for the
+// GroupsUserList call in groupLookupWorker returning zero matches in production.
+// It fakes the JumpCloud API's real behavior: limit truncates the result set
+// before name matching happens, so a limit of 1 can omit the group being looked
+// up entirely. It fails against the old limit=1/no-sort request shape and
+// passes against limit=0/sort=[]string{}.
+func TestGroupLookupWorkerFindsGroupBeyondFirstResult(t *testing.T) {
+	allGroups := []jcapiv2.UserGroup{
+		{Id: "id-alpha", Name: "alpha"},
+		{Id: "id-target", Name: "target"},
+		{Id: "id-gamma", Name: "gamma"},
+	}
+
+	var gotLimit string
+	var sawSortParam bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotLimit = r.URL.Query().Get("limit")
+		_, sawSortParam = r.URL.Query()["sort"]
+
+		w.Header().Set("Content-Type", "application/json")
+		if gotLimit == "1" {
+			json.NewEncoder(w).Encode(allGroups[:1])
+			return
+		}
+		json.NewEncoder(w).Encode(allGroups)
+	}))
+	defer server.Close()
+
+	cfg := jcapiv2.NewConfiguration()
+	cfg.BasePath = server.URL
+	client := jcapiv2.NewAPIClient(cfg)
+
+	names := make(chan string, 1)
+	results := make(chan groupLookupResult, 1)
+	names <- "target"
+	close(names)
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go groupLookupWorker(client, names, results, &wg)
+	wg.Wait()
+	close(results)
+
+	res := <-results
+	if res.err != nil {
+		t.Fatalf("unexpected error looking up group: %v", res.err)
+	}
+	if res.id != "id-target" {
+		t.Errorf("expected group 'target' to resolve to id 'id-target', got id %q", res.id)
+	}
+	if gotLimit != "0" {
+		t.Errorf("expected GroupsUserList to be called with limit=0, got limit=%q", gotLimit)
+	}
+	if !sawSortParam {
+		t.Error("expected GroupsUserList to be called with a sort param")
 	}
 }
 
