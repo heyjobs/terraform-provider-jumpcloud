@@ -195,7 +195,8 @@ func groupLookupWorker(client *jcapiv2.APIClient, names <-chan string, results c
 				"application/json",
 				map[string]interface{}{
 					"filter": filter,
-					"limit":  int32(1),
+					"limit":  int32(0),
+					"sort":   []string{},
 				},
 			)
 
