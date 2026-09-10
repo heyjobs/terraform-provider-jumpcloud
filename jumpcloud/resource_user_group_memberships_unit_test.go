@@ -9,12 +9,15 @@ import (
 	"testing"
 
 	jcapiv2 "github.com/TheJumpCloud/jcapi-go/v2"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 )
 
 // fakeGraphServer starts an httptest server mimicking enough of the JumpCloud v2 API for group
 // name/ID lookups, current-membership reads, and membership add/remove calls. recordOp is called
-// for every add/remove request received (group_id, op).
-func fakeGraphServer(t *testing.T, userID string, groups []jcapiv2.UserGroup, currentGroupIDs []string, recordOp func(groupID, op string)) *jcapiv2.APIClient {
+// for every add/remove request received (group_id, op). Returns a Configuration so callers can
+// either build a *jcapiv2.APIClient directly or pass it as the `m interface{}` a resource CRUD
+// function expects.
+func fakeGraphServer(t *testing.T, userID string, groups []jcapiv2.UserGroup, currentGroupIDs []string, recordOp func(groupID, op string)) *jcapiv2.Configuration {
 	t.Helper()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -41,7 +44,9 @@ func fakeGraphServer(t *testing.T, userID string, groups []jcapiv2.UserGroup, cu
 			groupID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/usergroups/"), "/members")
 			var body jcapiv2.UserGroupMembersReq
 			_ = json.NewDecoder(r.Body).Decode(&body)
-			recordOp(groupID, body.Op)
+			if recordOp != nil {
+				recordOp(groupID, body.Op)
+			}
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -50,110 +55,132 @@ func fakeGraphServer(t *testing.T, userID string, groups []jcapiv2.UserGroup, cu
 
 	cfg := jcapiv2.NewConfiguration()
 	cfg.BasePath = server.URL
-	return jcapiv2.NewAPIClient(cfg)
+	return cfg
 }
 
-// TestGroupSyncNeverTouchesIgnoreGroups is a regression test for the ignore_groups feature: a
-// group in ignore_groups must never be added, removed, or reported in the resource's groups
-// state, even when the user is currently a real member of it.
-func TestGroupSyncNeverTouchesIgnoreGroups(t *testing.T) {
+// TestCreateOnlyAddsNeverRemovesUndeclaredMembership is a regression test for the incident where
+// a real, undeclared membership got swept into removal: the user already has a real membership
+// ("extra") this config never mentions. Create must only ever add what's missing from `groups`,
+// never remove anything - not even "extra".
+func TestCreateOnlyAddsNeverRemovesUndeclaredMembership(t *testing.T) {
 	const userID = "user-1"
-	groups := []jcapiv2.UserGroup{
-		{Id: "id-a", Name: "a"},
-		{Id: "id-b", Name: "b"},
-	}
+	groups := []jcapiv2.UserGroup{{Id: "id-a", Name: "a"}}
 
 	var mu sync.Mutex
 	var ops []groupOperation
-	client := fakeGraphServer(t, userID, groups, []string{"id-a", "id-b"}, func(groupID, op string) {
+	cfg := fakeGraphServer(t, userID, groups, []string{"id-extra"}, func(groupID, op string) {
 		mu.Lock()
 		defer mu.Unlock()
 		ops = append(ops, groupOperation{groupID: groupID, op: op})
 	})
+	client := jcapiv2.NewAPIClient(cfg)
 
 	groupNameToID, err := lookupGroupsByName(client, []string{"a"}, true)
 	if err != nil {
 		t.Fatalf("lookupGroupsByName: %v", err)
 	}
-	ignoreGroupIDs, err := resolveIgnoreGroupIDs(client, []string{"b"})
-	if err != nil {
-		t.Fatalf("resolveIgnoreGroupIDs: %v", err)
-	}
 	currentGroupIDs, err := getUserGroupIDs(client, userID)
 	if err != nil {
 		t.Fatalf("getUserGroupIDs: %v", err)
 	}
 
-	syncGroupIDs := excludeGroupIDs(currentGroupIDs, ignoreGroupIDs)
 	desiredGroupIDs := make([]string, 0, len(groupNameToID))
 	for _, id := range groupNameToID {
 		desiredGroupIDs = append(desiredGroupIDs, id)
 	}
+	alreadyMemberIDs := intersectGroupIDs(currentGroupIDs, desiredGroupIDs)
 
-	if err := syncUserGroupsConcurrent(client, userID, syncGroupIDs, desiredGroupIDs, groupNameToID); err != nil {
-		t.Fatalf("syncUserGroupsConcurrent: %v", err)
-	}
-
-	mu.Lock()
-	for _, op := range ops {
-		if op.groupID == "id-b" {
-			t.Errorf("ignore_groups member 'b' (id-b) must never be touched, got operation %+v", op)
-		}
-	}
-	mu.Unlock()
-
-	// The resulting groups state (as Read builds it) must exclude ignore_groups too.
-	groupIDToName, err := getGroupIDToNameMap(client, currentGroupIDs)
-	if err != nil {
-		t.Fatalf("getGroupIDToNameMap: %v", err)
-	}
-	var stateGroups []string
-	for _, name := range groupIDToName {
-		if name == "b" {
-			continue
-		}
-		stateGroups = append(stateGroups, name)
-	}
-	if len(stateGroups) != 1 || stateGroups[0] != "a" {
-		t.Errorf("expected resulting groups state to be [\"a\"], got %v", stateGroups)
-	}
-}
-
-// TestDeleteNeverRemovesIgnoreGroups is a regression test for resourceUserGroupMembershipsDelete:
-// destroying the resource must only remove the groups it manages, never ignore_groups.
-func TestDeleteNeverRemovesIgnoreGroups(t *testing.T) {
-	const userID = "user-1"
-	groups := []jcapiv2.UserGroup{
-		{Id: "id-a", Name: "a"},
-		{Id: "id-b", Name: "b"},
-	}
-
-	var mu sync.Mutex
-	var ops []groupOperation
-	client := fakeGraphServer(t, userID, groups, []string{"id-a", "id-b"}, func(groupID, op string) {
-		mu.Lock()
-		defer mu.Unlock()
-		ops = append(ops, groupOperation{groupID: groupID, op: op})
-	})
-
-	ignoreGroupIDs, err := resolveIgnoreGroupIDs(client, []string{"b"})
-	if err != nil {
-		t.Fatalf("resolveIgnoreGroupIDs: %v", err)
-	}
-	currentGroupIDs, err := getUserGroupIDs(client, userID)
-	if err != nil {
-		t.Fatalf("getUserGroupIDs: %v", err)
-	}
-
-	removeGroupIDs := excludeGroupIDs(currentGroupIDs, ignoreGroupIDs)
-	if err := syncUserGroupsConcurrent(client, userID, removeGroupIDs, []string{}, nil); err != nil {
+	if err := syncUserGroupsConcurrent(client, userID, alreadyMemberIDs, desiredGroupIDs, groupNameToID); err != nil {
 		t.Fatalf("syncUserGroupsConcurrent: %v", err)
 	}
 
 	mu.Lock()
 	defer mu.Unlock()
+	if len(ops) != 1 || ops[0].groupID != "id-a" || ops[0].op != "add" {
+		t.Fatalf("expected exactly one add for id-a, got %+v", ops)
+	}
+	for _, op := range ops {
+		if op.groupID == "id-extra" {
+			t.Errorf("undeclared group 'extra' must never be touched, got %+v", op)
+		}
+	}
+}
+
+// TestDeleteOnlyRemovesDeclaredGroups is a regression test for the actual incident: a merge of
+// this resource stripped 226 memberships across 106 users because Delete discovered and removed
+// the user's FULL real membership. The user's real membership includes an undeclared "extra"
+// group; destroying the resource must remove only "a" (declared in `groups`), never "extra".
+func TestDeleteOnlyRemovesDeclaredGroups(t *testing.T) {
+	const userID = "user-1"
+	groups := []jcapiv2.UserGroup{{Id: "id-a", Name: "a"}}
+
+	var mu sync.Mutex
+	var ops []groupOperation
+	cfg := fakeGraphServer(t, userID, groups, []string{"id-a", "id-extra"}, func(groupID, op string) {
+		mu.Lock()
+		defer mu.Unlock()
+		ops = append(ops, groupOperation{groupID: groupID, op: op})
+	})
+
+	d := schema.TestResourceDataRaw(t, resourceUserGroupMemberships().Schema, map[string]interface{}{
+		"user_email": "user@example.com",
+		"groups":     []interface{}{"a"},
+	})
+	d.SetId(userID)
+
+	if err := resourceUserGroupMembershipsDelete(d, cfg); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
 	if len(ops) != 1 || ops[0].groupID != "id-a" || ops[0].op != "remove" {
-		t.Errorf("expected exactly one remove operation for id-a (never id-b), got %+v", ops)
+		t.Errorf("expected exactly one remove for id-a (never id-extra), got %+v", ops)
+	}
+}
+
+// TestReadNeverSurfacesUndeclaredGroup is a regression test proving Read never reports a real,
+// undeclared group into the `groups` state - only the resource's own declared groups are checked.
+func TestReadNeverSurfacesUndeclaredGroup(t *testing.T) {
+	const userID = "user-1"
+	groups := []jcapiv2.UserGroup{{Id: "id-a", Name: "a"}}
+	cfg := fakeGraphServer(t, userID, groups, []string{"id-a", "id-extra"}, nil)
+
+	d := schema.TestResourceDataRaw(t, resourceUserGroupMemberships().Schema, map[string]interface{}{
+		"user_email": "user@example.com",
+		"groups":     []interface{}{"a"},
+	})
+	d.SetId(userID)
+
+	if err := resourceUserGroupMembershipsRead(d, cfg); err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+
+	gotGroups := stringSetToSlice(d.Get("groups").(*schema.Set))
+	if len(gotGroups) != 1 || gotGroups[0] != "a" {
+		t.Errorf("expected state groups to be [\"a\"] (never surfacing undeclared 'extra'), got %v", gotGroups)
+	}
+}
+
+// TestSyncUserGroupsFailsClosedOnUndeclaredGroupID is a belt-and-suspenders test for the
+// fail-closed guard in syncUserGroupsConcurrent: this scenario should be unreachable via
+// Create/Update/Delete's allowlist-only logic (that's the point), so it's forced directly by
+// passing a groupID with no corresponding entry in groupNameToID. The guard must refuse the
+// entire operation set - not just error out, but send zero add/remove requests.
+func TestSyncUserGroupsFailsClosedOnUndeclaredGroupID(t *testing.T) {
+	const userID = "user-1"
+	var calls int
+	cfg := fakeGraphServer(t, userID, nil, nil, func(string, string) {
+		calls++
+	})
+	client := jcapiv2.NewAPIClient(cfg)
+
+	err := syncUserGroupsConcurrent(client, userID, []string{"id-mystery"}, []string{}, map[string]string{})
+	if err == nil {
+		t.Fatal("expected an error for an operation with no declared group name, got nil")
+	}
+	if calls != 0 {
+		t.Errorf("expected zero group operations to be sent when the guard trips, got %d", calls)
 	}
 }
 
