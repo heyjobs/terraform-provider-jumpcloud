@@ -4,11 +4,158 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
 	jcapiv2 "github.com/TheJumpCloud/jcapi-go/v2"
 )
+
+// fakeGraphServer starts an httptest server mimicking enough of the JumpCloud v2 API for group
+// name/ID lookups, current-membership reads, and membership add/remove calls. recordOp is called
+// for every add/remove request received (group_id, op).
+func fakeGraphServer(t *testing.T, userID string, groups []jcapiv2.UserGroup, currentGroupIDs []string, recordOp func(groupID, op string)) *jcapiv2.APIClient {
+	t.Helper()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/usergroups":
+			json.NewEncoder(w).Encode(groups)
+		case r.Method == http.MethodGet && r.URL.Path == "/users/"+userID+"/memberof":
+			members := make([]jcapiv2.GraphObjectWithPaths, 0, len(currentGroupIDs))
+			for _, id := range currentGroupIDs {
+				members = append(members, jcapiv2.GraphObjectWithPaths{Id: id})
+			}
+			json.NewEncoder(w).Encode(members)
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/usergroups/"):
+			id := strings.TrimPrefix(r.URL.Path, "/usergroups/")
+			for _, g := range groups {
+				if g.Id == id {
+					json.NewEncoder(w).Encode(g)
+					return
+				}
+			}
+			w.WriteHeader(http.StatusNotFound)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/members"):
+			groupID := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/usergroups/"), "/members")
+			var body jcapiv2.UserGroupMembersReq
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			recordOp(groupID, body.Op)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	cfg := jcapiv2.NewConfiguration()
+	cfg.BasePath = server.URL
+	return jcapiv2.NewAPIClient(cfg)
+}
+
+// TestGroupSyncNeverTouchesIgnoreGroups is a regression test for the ignore_groups feature: a
+// group in ignore_groups must never be added, removed, or reported in the resource's groups
+// state, even when the user is currently a real member of it.
+func TestGroupSyncNeverTouchesIgnoreGroups(t *testing.T) {
+	const userID = "user-1"
+	groups := []jcapiv2.UserGroup{
+		{Id: "id-a", Name: "a"},
+		{Id: "id-b", Name: "b"},
+	}
+
+	var mu sync.Mutex
+	var ops []groupOperation
+	client := fakeGraphServer(t, userID, groups, []string{"id-a", "id-b"}, func(groupID, op string) {
+		mu.Lock()
+		defer mu.Unlock()
+		ops = append(ops, groupOperation{groupID: groupID, op: op})
+	})
+
+	groupNameToID, err := lookupGroupsByName(client, []string{"a"}, true)
+	if err != nil {
+		t.Fatalf("lookupGroupsByName: %v", err)
+	}
+	ignoreGroupIDs, err := resolveIgnoreGroupIDs(client, []string{"b"})
+	if err != nil {
+		t.Fatalf("resolveIgnoreGroupIDs: %v", err)
+	}
+	currentGroupIDs, err := getUserGroupIDs(client, userID)
+	if err != nil {
+		t.Fatalf("getUserGroupIDs: %v", err)
+	}
+
+	syncGroupIDs := excludeGroupIDs(currentGroupIDs, ignoreGroupIDs)
+	desiredGroupIDs := make([]string, 0, len(groupNameToID))
+	for _, id := range groupNameToID {
+		desiredGroupIDs = append(desiredGroupIDs, id)
+	}
+
+	if err := syncUserGroupsConcurrent(client, userID, syncGroupIDs, desiredGroupIDs, groupNameToID); err != nil {
+		t.Fatalf("syncUserGroupsConcurrent: %v", err)
+	}
+
+	mu.Lock()
+	for _, op := range ops {
+		if op.groupID == "id-b" {
+			t.Errorf("ignore_groups member 'b' (id-b) must never be touched, got operation %+v", op)
+		}
+	}
+	mu.Unlock()
+
+	// The resulting groups state (as Read builds it) must exclude ignore_groups too.
+	groupIDToName, err := getGroupIDToNameMap(client, currentGroupIDs)
+	if err != nil {
+		t.Fatalf("getGroupIDToNameMap: %v", err)
+	}
+	var stateGroups []string
+	for _, name := range groupIDToName {
+		if name == "b" {
+			continue
+		}
+		stateGroups = append(stateGroups, name)
+	}
+	if len(stateGroups) != 1 || stateGroups[0] != "a" {
+		t.Errorf("expected resulting groups state to be [\"a\"], got %v", stateGroups)
+	}
+}
+
+// TestDeleteNeverRemovesIgnoreGroups is a regression test for resourceUserGroupMembershipsDelete:
+// destroying the resource must only remove the groups it manages, never ignore_groups.
+func TestDeleteNeverRemovesIgnoreGroups(t *testing.T) {
+	const userID = "user-1"
+	groups := []jcapiv2.UserGroup{
+		{Id: "id-a", Name: "a"},
+		{Id: "id-b", Name: "b"},
+	}
+
+	var mu sync.Mutex
+	var ops []groupOperation
+	client := fakeGraphServer(t, userID, groups, []string{"id-a", "id-b"}, func(groupID, op string) {
+		mu.Lock()
+		defer mu.Unlock()
+		ops = append(ops, groupOperation{groupID: groupID, op: op})
+	})
+
+	ignoreGroupIDs, err := resolveIgnoreGroupIDs(client, []string{"b"})
+	if err != nil {
+		t.Fatalf("resolveIgnoreGroupIDs: %v", err)
+	}
+	currentGroupIDs, err := getUserGroupIDs(client, userID)
+	if err != nil {
+		t.Fatalf("getUserGroupIDs: %v", err)
+	}
+
+	removeGroupIDs := excludeGroupIDs(currentGroupIDs, ignoreGroupIDs)
+	if err := syncUserGroupsConcurrent(client, userID, removeGroupIDs, []string{}, nil); err != nil {
+		t.Fatalf("syncUserGroupsConcurrent: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(ops) != 1 || ops[0].groupID != "id-a" || ops[0].op != "remove" {
+		t.Errorf("expected exactly one remove operation for id-a (never id-b), got %+v", ops)
+	}
+}
 
 // TestGroupOperationStructure tests that groupOperation struct is properly defined
 func TestGroupOperationStructure(t *testing.T) {

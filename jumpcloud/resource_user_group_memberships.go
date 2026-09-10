@@ -62,6 +62,16 @@ func resourceUserGroupMemberships() *schema.Resource {
 					Type: schema.TypeString,
 				},
 			},
+			"ignore_groups": {
+				Description: "List of group names this resource must never manage: never added, " +
+					"never removed, and never reported as drift. Use this for groups managed " +
+					"outside Terraform (e.g. IT-managed groups) that this resource should not touch.",
+				Type:     schema.TypeSet,
+				Optional: true,
+				Elem: &schema.Schema{
+					Type: schema.TypeString,
+				},
+			},
 			"group_ids": {
 				Description: "Map of group names to their IDs (computed).",
 				Type:        schema.TypeMap,
@@ -110,8 +120,10 @@ type groupLookupResult struct {
 	err   error
 }
 
-// lookupGroupsByName looks up multiple groups by name concurrently and returns a map of name -> ID
-func lookupGroupsByName(client *jcapiv2.APIClient, groupNames []string) (map[string]string, error) {
+// lookupGroupsByName looks up multiple groups by name concurrently and returns a map of name -> ID.
+// If failOnNotFound is false, names that don't resolve to a group are silently omitted from the
+// result instead of causing an error (used for ignore_groups, where a nonexistent group is a no-op).
+func lookupGroupsByName(client *jcapiv2.APIClient, groupNames []string, failOnNotFound bool) (map[string]string, error) {
 	result := make(map[string]string)
 
 	if len(groupNames) == 0 {
@@ -165,11 +177,68 @@ func lookupGroupsByName(client *jcapiv2.APIClient, groupNames []string) (map[str
 	}
 
 	if len(notFound) > 0 {
-		return nil, fmt.Errorf("groups not found: %s", strings.Join(notFound, ", "))
+		if failOnNotFound {
+			return nil, fmt.Errorf("groups not found: %s", strings.Join(notFound, ", "))
+		}
+		log.Printf("[DEBUG] lookupGroupsByName: groups not found (ignored): %s", strings.Join(notFound, ", "))
 	}
 
 	log.Printf("[DEBUG] lookupGroupsByName: Successfully looked up %d groups", len(result))
 	return result, nil
+}
+
+// groupNameOverlap returns the names present in both slices, sorted.
+func groupNameOverlap(a, b []string) []string {
+	set := make(map[string]bool, len(a))
+	for _, name := range a {
+		set[name] = true
+	}
+	var overlap []string
+	for _, name := range b {
+		if set[name] {
+			overlap = append(overlap, name)
+		}
+	}
+	sort.Strings(overlap)
+	return overlap
+}
+
+// stringSetToSlice converts a *schema.Set of strings to a []string.
+func stringSetToSlice(s *schema.Set) []string {
+	list := make([]string, 0, s.Len())
+	for _, v := range s.List() {
+		list = append(list, v.(string))
+	}
+	return list
+}
+
+// resolveIgnoreGroupIDs resolves ignore_groups names to a set of group IDs. Names that don't
+// resolve to a real group are silently skipped: there's nothing to protect from removal if the
+// group doesn't exist.
+func resolveIgnoreGroupIDs(client *jcapiv2.APIClient, ignoreGroupNames []string) (map[string]bool, error) {
+	nameToID, err := lookupGroupsByName(client, ignoreGroupNames, false)
+	if err != nil {
+		return nil, err
+	}
+	ids := make(map[string]bool, len(nameToID))
+	for _, id := range nameToID {
+		ids[id] = true
+	}
+	return ids, nil
+}
+
+// excludeGroupIDs returns ids with any member of exclude removed.
+func excludeGroupIDs(ids []string, exclude map[string]bool) []string {
+	if len(exclude) == 0 {
+		return ids
+	}
+	filtered := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if !exclude[id] {
+			filtered = append(filtered, id)
+		}
+	}
+	return filtered
 }
 
 // groupLookupWorker looks up groups by name from the channel with exponential backoff retry
@@ -355,13 +424,19 @@ func resourceUserGroupMembershipsCreate(d *schema.ResourceData, m interface{}) e
 	_ = d.Set("user_id", userID)
 
 	// Get desired group names and look them up
-	groupNamesSet := d.Get("groups").(*schema.Set)
-	groupNames := make([]string, 0, groupNamesSet.Len())
-	for _, name := range groupNamesSet.List() {
-		groupNames = append(groupNames, name.(string))
+	groupNames := stringSetToSlice(d.Get("groups").(*schema.Set))
+	ignoreGroupNames := stringSetToSlice(d.Get("ignore_groups").(*schema.Set))
+
+	if overlap := groupNameOverlap(groupNames, ignoreGroupNames); len(overlap) > 0 {
+		return fmt.Errorf("group(s) %s cannot be in both 'groups' and 'ignore_groups'", strings.Join(overlap, ", "))
 	}
 
-	groupNameToID, err := lookupGroupsByName(clientv2, groupNames)
+	groupNameToID, err := lookupGroupsByName(clientv2, groupNames, true)
+	if err != nil {
+		return err
+	}
+
+	ignoreGroupIDs, err := resolveIgnoreGroupIDs(clientv2, ignoreGroupNames)
 	if err != nil {
 		return err
 	}
@@ -374,6 +449,7 @@ func resourceUserGroupMembershipsCreate(d *schema.ResourceData, m interface{}) e
 	if err != nil {
 		return fmt.Errorf("error getting current group memberships: %s", err)
 	}
+	currentGroupIDs = excludeGroupIDs(currentGroupIDs, ignoreGroupIDs)
 
 	// Build list of desired group IDs
 	desiredGroupIDs := make([]string, 0, len(groupNameToID))
@@ -415,10 +491,19 @@ func resourceUserGroupMembershipsRead(d *schema.ResourceData, m interface{}) err
 		return fmt.Errorf("error looking up group names: %s", err)
 	}
 
-	// Build the groups list and group_ids map
+	ignoreGroupNames := make(map[string]bool)
+	for _, name := range stringSetToSlice(d.Get("ignore_groups").(*schema.Set)) {
+		ignoreGroupNames[name] = true
+	}
+
+	// Build the groups list and group_ids map, excluding ignore_groups: this resource
+	// only reports on the groups it manages, not the user's full real membership set.
 	groupNames := make([]string, 0, len(groupIDToName))
 	groupIDs := make(map[string]string)
 	for id, name := range groupIDToName {
+		if ignoreGroupNames[name] {
+			continue
+		}
 		groupNames = append(groupNames, name)
 		groupIDs[name] = id
 	}
@@ -438,21 +523,16 @@ func resourceUserGroupMembershipsUpdate(d *schema.ResourceData, m interface{}) e
 
 	userID := d.Id()
 
+	ignoreGroupNames := stringSetToSlice(d.Get("ignore_groups").(*schema.Set))
+	if overlap := groupNameOverlap(stringSetToSlice(d.Get("groups").(*schema.Set)), ignoreGroupNames); len(overlap) > 0 {
+		return fmt.Errorf("group(s) %s cannot be in both 'groups' and 'ignore_groups'", strings.Join(overlap, ", "))
+	}
+
 	if d.HasChange("groups") {
 		// Get old and new group names
 		oldGroupsRaw, newGroupsRaw := d.GetChange("groups")
-		oldGroupsSet := oldGroupsRaw.(*schema.Set)
-		newGroupsSet := newGroupsRaw.(*schema.Set)
-
-		oldGroupNames := make([]string, 0, oldGroupsSet.Len())
-		for _, name := range oldGroupsSet.List() {
-			oldGroupNames = append(oldGroupNames, name.(string))
-		}
-
-		newGroupNames := make([]string, 0, newGroupsSet.Len())
-		for _, name := range newGroupsSet.List() {
-			newGroupNames = append(newGroupNames, name.(string))
-		}
+		oldGroupNames := stringSetToSlice(oldGroupsRaw.(*schema.Set))
+		newGroupNames := stringSetToSlice(newGroupsRaw.(*schema.Set))
 
 		// Look up all group names (old and new combined)
 		allGroupNames := make(map[string]bool)
@@ -468,7 +548,12 @@ func resourceUserGroupMembershipsUpdate(d *schema.ResourceData, m interface{}) e
 			allGroupNamesList = append(allGroupNamesList, name)
 		}
 
-		groupNameToID, err := lookupGroupsByName(clientv2, allGroupNamesList)
+		groupNameToID, err := lookupGroupsByName(clientv2, allGroupNamesList, true)
+		if err != nil {
+			return err
+		}
+
+		ignoreGroupIDs, err := resolveIgnoreGroupIDs(clientv2, ignoreGroupNames)
 		if err != nil {
 			return err
 		}
@@ -480,6 +565,7 @@ func resourceUserGroupMembershipsUpdate(d *schema.ResourceData, m interface{}) e
 				oldGroupIDs = append(oldGroupIDs, id)
 			}
 		}
+		oldGroupIDs = excludeGroupIDs(oldGroupIDs, ignoreGroupIDs)
 
 		newGroupIDs := make([]string, 0, len(newGroupNames))
 		for _, name := range newGroupNames {
@@ -487,6 +573,7 @@ func resourceUserGroupMembershipsUpdate(d *schema.ResourceData, m interface{}) e
 				newGroupIDs = append(newGroupIDs, id)
 			}
 		}
+		newGroupIDs = excludeGroupIDs(newGroupIDs, ignoreGroupIDs)
 
 		// Sync memberships concurrently
 		if err := syncUserGroupsConcurrent(clientv2, userID, oldGroupIDs, newGroupIDs, groupNameToID); err != nil {
@@ -522,8 +609,14 @@ func resourceUserGroupMembershipsDelete(d *schema.ResourceData, m interface{}) e
 		return fmt.Errorf("error getting current group memberships: %s", err)
 	}
 
-	// Remove user from all groups (sync to empty list)
-	if err := syncUserGroupsConcurrent(clientv2, userID, currentGroupIDs, []string{}, nil); err != nil {
+	ignoreGroupIDs, err := resolveIgnoreGroupIDs(clientv2, stringSetToSlice(d.Get("ignore_groups").(*schema.Set)))
+	if err != nil {
+		return err
+	}
+
+	// Remove user from all managed groups (sync to empty list), but never touch ignore_groups
+	removeGroupIDs := excludeGroupIDs(currentGroupIDs, ignoreGroupIDs)
+	if err := syncUserGroupsConcurrent(clientv2, userID, removeGroupIDs, []string{}, nil); err != nil {
 		return err
 	}
 
