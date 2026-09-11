@@ -62,6 +62,16 @@ func resourceUserGroupMemberships() *schema.Resource {
 					Type: schema.TypeString,
 				},
 			},
+			"ignore_groups": {
+				Description: "List of group names this resource must never manage: never added, " +
+					"never removed, and never reported as drift. Use this for groups managed " +
+					"outside Terraform (e.g. IT-managed groups) that this resource should not touch.",
+				Type:     schema.TypeSet,
+				Optional: true,
+				Elem: &schema.Schema{
+					Type: schema.TypeString,
+				},
+			},
 			"group_ids": {
 				Description: "Map of group names to their IDs (computed).",
 				Type:        schema.TypeMap,
@@ -110,8 +120,10 @@ type groupLookupResult struct {
 	err   error
 }
 
-// lookupGroupsByName looks up multiple groups by name concurrently and returns a map of name -> ID
-func lookupGroupsByName(client *jcapiv2.APIClient, groupNames []string) (map[string]string, error) {
+// lookupGroupsByName looks up multiple groups by name concurrently and returns a map of name -> ID.
+// If failOnNotFound is false, names that don't resolve to a group are silently omitted from the
+// result instead of causing an error (used for ignore_groups, where a nonexistent group is a no-op).
+func lookupGroupsByName(client *jcapiv2.APIClient, groupNames []string, failOnNotFound bool) (map[string]string, error) {
 	result := make(map[string]string)
 
 	if len(groupNames) == 0 {
@@ -165,11 +177,54 @@ func lookupGroupsByName(client *jcapiv2.APIClient, groupNames []string) (map[str
 	}
 
 	if len(notFound) > 0 {
-		return nil, fmt.Errorf("groups not found: %s", strings.Join(notFound, ", "))
+		if failOnNotFound {
+			return nil, fmt.Errorf("groups not found: %s", strings.Join(notFound, ", "))
+		}
+		log.Printf("[DEBUG] lookupGroupsByName: groups not found (ignored): %s", strings.Join(notFound, ", "))
 	}
 
 	log.Printf("[DEBUG] lookupGroupsByName: Successfully looked up %d groups", len(result))
 	return result, nil
+}
+
+// groupNameOverlap returns the names present in both slices, sorted.
+func groupNameOverlap(a, b []string) []string {
+	set := make(map[string]bool, len(a))
+	for _, name := range a {
+		set[name] = true
+	}
+	var overlap []string
+	for _, name := range b {
+		if set[name] {
+			overlap = append(overlap, name)
+		}
+	}
+	sort.Strings(overlap)
+	return overlap
+}
+
+// stringSetToSlice converts a *schema.Set of strings to a []string.
+func stringSetToSlice(s *schema.Set) []string {
+	list := make([]string, 0, s.Len())
+	for _, v := range s.List() {
+		list = append(list, v.(string))
+	}
+	return list
+}
+
+// intersectGroupIDs returns the ids from a that are also present in b.
+func intersectGroupIDs(a, b []string) []string {
+	set := make(map[string]bool, len(b))
+	for _, id := range b {
+		set[id] = true
+	}
+	out := make([]string, 0, len(a))
+	for _, id := range a {
+		if set[id] {
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 // groupLookupWorker looks up groups by name from the channel with exponential backoff retry
@@ -195,7 +250,8 @@ func groupLookupWorker(client *jcapiv2.APIClient, names <-chan string, results c
 				"application/json",
 				map[string]interface{}{
 					"filter": filter,
-					"limit":  int32(1),
+					"limit":  int32(0),
+					"sort":   []string{},
 				},
 			)
 
@@ -224,117 +280,6 @@ func groupLookupWorker(client *jcapiv2.APIClient, names <-chan string, results c
 	}
 }
 
-// groupIDLookupResult represents the result of a single group ID lookup
-type groupIDLookupResult struct {
-	id   string
-	name string
-	err  error
-}
-
-// getGroupIDToNameMap looks up multiple groups by ID concurrently and returns a map of ID -> name
-func getGroupIDToNameMap(client *jcapiv2.APIClient, groupIDs []string) (map[string]string, error) {
-	result := make(map[string]string)
-
-	if len(groupIDs) == 0 {
-		return result, nil
-	}
-
-	log.Printf("[DEBUG] getGroupIDToNameMap: Looking up %d groups by ID concurrently", len(groupIDs))
-
-	// Determine number of workers
-	numWorkers := maxConcurrentGroupOps
-	if len(groupIDs) < numWorkers {
-		numWorkers = len(groupIDs)
-	}
-
-	// Channels for work distribution and results
-	idChan := make(chan string, len(groupIDs))
-	resultChan := make(chan groupIDLookupResult, len(groupIDs))
-
-	// Start workers
-	var wg sync.WaitGroup
-	for i := 0; i < numWorkers; i++ {
-		wg.Add(1)
-		go groupIDLookupWorker(client, idChan, resultChan, &wg)
-	}
-
-	// Send group IDs to workers
-	for _, id := range groupIDs {
-		idChan <- id
-	}
-	close(idChan)
-
-	// Wait for all workers to complete
-	wg.Wait()
-	close(resultChan)
-
-	// Collect results
-	var errors []string
-	for res := range resultChan {
-		if res.err != nil {
-			errors = append(errors, fmt.Sprintf("%s: %s", res.id, res.err.Error()))
-		} else if res.name != "" {
-			result[res.id] = res.name
-		}
-		// If name is empty, group might have been deleted - skip silently
-	}
-
-	if len(errors) > 0 {
-		return nil, fmt.Errorf("errors looking up groups by ID:\n%s", strings.Join(errors, "\n"))
-	}
-
-	log.Printf("[DEBUG] getGroupIDToNameMap: Successfully looked up %d groups", len(result))
-	return result, nil
-}
-
-// groupIDLookupWorker looks up groups by ID from the channel with exponential backoff retry
-func groupIDLookupWorker(client *jcapiv2.APIClient, ids <-chan string, results chan<- groupIDLookupResult, wg *sync.WaitGroup) {
-	defer wg.Done()
-
-	for id := range ids {
-		var lastErr error
-		var foundName string
-
-		for attempt := 0; attempt < maxRetries; attempt++ {
-			if attempt > 0 {
-				backoff := time.Duration(baseBackoffMs*(1<<attempt)) * time.Millisecond
-				log.Printf("[DEBUG] groupIDLookupWorker: Retry %d for group ID %s after %v", attempt, id, backoff)
-				time.Sleep(backoff)
-			}
-
-			group, _, err := client.UserGroupsApi.GroupsUserGet(
-				context.Background(),
-				id,
-				"application/json",
-				"application/json",
-				nil,
-			)
-
-			if err != nil {
-				// Check if group was deleted (404)
-				if strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "not found") {
-					lastErr = nil
-					foundName = ""
-					break
-				}
-				lastErr = err
-				continue
-			}
-
-			lastErr = nil
-			foundName = group.Name
-			break
-		}
-
-		if lastErr != nil {
-			results <- groupIDLookupResult{id: id, err: lastErr}
-		} else {
-			results <- groupIDLookupResult{id: id, name: foundName}
-		}
-		time.Sleep(groupOpRateLimitMs * time.Millisecond)
-	}
-}
-
 func resourceUserGroupMembershipsCreate(d *schema.ResourceData, m interface{}) error {
 	config := m.(*jcapiv2.Configuration)
 	configv1 := convertV2toV1Config(config)
@@ -354,13 +299,14 @@ func resourceUserGroupMembershipsCreate(d *schema.ResourceData, m interface{}) e
 	_ = d.Set("user_id", userID)
 
 	// Get desired group names and look them up
-	groupNamesSet := d.Get("groups").(*schema.Set)
-	groupNames := make([]string, 0, groupNamesSet.Len())
-	for _, name := range groupNamesSet.List() {
-		groupNames = append(groupNames, name.(string))
+	groupNames := stringSetToSlice(d.Get("groups").(*schema.Set))
+	ignoreGroupNames := stringSetToSlice(d.Get("ignore_groups").(*schema.Set))
+
+	if overlap := groupNameOverlap(groupNames, ignoreGroupNames); len(overlap) > 0 {
+		return fmt.Errorf("group(s) %s cannot be in both 'groups' and 'ignore_groups'", strings.Join(overlap, ", "))
 	}
 
-	groupNameToID, err := lookupGroupsByName(clientv2, groupNames)
+	groupNameToID, err := lookupGroupsByName(clientv2, groupNames, true)
 	if err != nil {
 		return err
 	}
@@ -368,7 +314,8 @@ func resourceUserGroupMembershipsCreate(d *schema.ResourceData, m interface{}) e
 	// Store the group ID mapping
 	_ = d.Set("group_ids", groupNameToID)
 
-	// Get current group IDs (should be empty for new user, but check anyway)
+	// Get the user's real current membership, but only ever to check which declared groups
+	// they're already in - never to discover undeclared groups as removal candidates.
 	currentGroupIDs, err := getUserGroupIDs(clientv2, userID)
 	if err != nil {
 		return fmt.Errorf("error getting current group memberships: %s", err)
@@ -380,8 +327,12 @@ func resourceUserGroupMembershipsCreate(d *schema.ResourceData, m interface{}) e
 		desiredGroupIDs = append(desiredGroupIDs, id)
 	}
 
+	// The "old" set passed to the sync diff is current membership intersected with desired:
+	// always a subset of desired, so the diff can only ever add, structurally never remove.
+	alreadyMemberIDs := intersectGroupIDs(currentGroupIDs, desiredGroupIDs)
+
 	// Sync memberships
-	if err := syncUserGroupsConcurrent(clientv2, userID, currentGroupIDs, desiredGroupIDs, groupNameToID); err != nil {
+	if err := syncUserGroupsConcurrent(clientv2, userID, alreadyMemberIDs, desiredGroupIDs, groupNameToID); err != nil {
 		return err
 	}
 
@@ -397,7 +348,18 @@ func resourceUserGroupMembershipsRead(d *schema.ResourceData, m interface{}) err
 		return nil
 	}
 
-	// Get current group IDs for the user
+	// Only ever check status for the groups this resource's own prior state declared - a real
+	// group the user belongs to that was never declared must never appear here, in either
+	// direction. Names that no longer resolve to a real group are treated as "not a member"
+	// (surfaces as drift on the next plan) rather than failing Read outright.
+	declaredGroupNames := stringSetToSlice(d.Get("groups").(*schema.Set))
+	declaredNameToID, err := lookupGroupsByName(clientv2, declaredGroupNames, false)
+	if err != nil {
+		return fmt.Errorf("error looking up declared groups: %s", err)
+	}
+
+	// Get the user's real current membership, but only to check which declared groups they're
+	// still actually in - never to discover or report on undeclared groups.
 	currentGroupIDs, err := getUserGroupIDs(clientv2, userID)
 	if err != nil {
 		// If user not found, remove from state
@@ -407,17 +369,17 @@ func resourceUserGroupMembershipsRead(d *schema.ResourceData, m interface{}) err
 		}
 		return fmt.Errorf("error getting current group memberships: %s", err)
 	}
-
-	// Look up group names from IDs
-	groupIDToName, err := getGroupIDToNameMap(clientv2, currentGroupIDs)
-	if err != nil {
-		return fmt.Errorf("error looking up group names: %s", err)
+	currentGroupSet := make(map[string]bool, len(currentGroupIDs))
+	for _, id := range currentGroupIDs {
+		currentGroupSet[id] = true
 	}
 
-	// Build the groups list and group_ids map
-	groupNames := make([]string, 0, len(groupIDToName))
-	groupIDs := make(map[string]string)
-	for id, name := range groupIDToName {
+	groupNames := make([]string, 0, len(declaredNameToID))
+	groupIDs := make(map[string]string, len(declaredNameToID))
+	for name, id := range declaredNameToID {
+		if !currentGroupSet[id] {
+			continue
+		}
 		groupNames = append(groupNames, name)
 		groupIDs[name] = id
 	}
@@ -437,21 +399,15 @@ func resourceUserGroupMembershipsUpdate(d *schema.ResourceData, m interface{}) e
 
 	userID := d.Id()
 
+	if overlap := groupNameOverlap(stringSetToSlice(d.Get("groups").(*schema.Set)), stringSetToSlice(d.Get("ignore_groups").(*schema.Set))); len(overlap) > 0 {
+		return fmt.Errorf("group(s) %s cannot be in both 'groups' and 'ignore_groups'", strings.Join(overlap, ", "))
+	}
+
 	if d.HasChange("groups") {
 		// Get old and new group names
 		oldGroupsRaw, newGroupsRaw := d.GetChange("groups")
-		oldGroupsSet := oldGroupsRaw.(*schema.Set)
-		newGroupsSet := newGroupsRaw.(*schema.Set)
-
-		oldGroupNames := make([]string, 0, oldGroupsSet.Len())
-		for _, name := range oldGroupsSet.List() {
-			oldGroupNames = append(oldGroupNames, name.(string))
-		}
-
-		newGroupNames := make([]string, 0, newGroupsSet.Len())
-		for _, name := range newGroupsSet.List() {
-			newGroupNames = append(newGroupNames, name.(string))
-		}
+		oldGroupNames := stringSetToSlice(oldGroupsRaw.(*schema.Set))
+		newGroupNames := stringSetToSlice(newGroupsRaw.(*schema.Set))
 
 		// Look up all group names (old and new combined)
 		allGroupNames := make(map[string]bool)
@@ -467,7 +423,7 @@ func resourceUserGroupMembershipsUpdate(d *schema.ResourceData, m interface{}) e
 			allGroupNamesList = append(allGroupNamesList, name)
 		}
 
-		groupNameToID, err := lookupGroupsByName(clientv2, allGroupNamesList)
+		groupNameToID, err := lookupGroupsByName(clientv2, allGroupNamesList, true)
 		if err != nil {
 			return err
 		}
@@ -511,18 +467,26 @@ func resourceUserGroupMembershipsDelete(d *schema.ResourceData, m interface{}) e
 
 	userID := d.Id()
 
-	// Get current group IDs
-	currentGroupIDs, err := getUserGroupIDs(clientv2, userID)
+	// Remove only the groups this resource's own state declares. Never call getUserGroupIDs to
+	// discover the user's full real membership for deletion purposes - that discovery is exactly
+	// what let an earlier version of this resource strip undeclared, IT-managed groups on destroy.
+	declaredGroupNames := stringSetToSlice(d.Get("groups").(*schema.Set))
+	groupNameToID, err := lookupGroupsByName(clientv2, declaredGroupNames, false)
 	if err != nil {
-		// If user not found, consider delete successful
-		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "404") {
-			return nil
-		}
-		return fmt.Errorf("error getting current group memberships: %s", err)
+		return err
 	}
 
-	// Remove user from all groups (sync to empty list)
-	if err := syncUserGroupsConcurrent(clientv2, userID, currentGroupIDs, []string{}, nil); err != nil {
+	removeGroupIDs := make([]string, 0, len(groupNameToID))
+	for _, id := range groupNameToID {
+		removeGroupIDs = append(removeGroupIDs, id)
+	}
+
+	if err := syncUserGroupsConcurrent(clientv2, userID, removeGroupIDs, []string{}, groupNameToID); err != nil {
+		// If the user is already gone, the memberships are already gone too - idempotent destroy.
+		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "404") {
+			d.SetId("")
+			return nil
+		}
 		return err
 	}
 
@@ -576,6 +540,20 @@ func syncUserGroupsConcurrent(client *jcapiv2.APIClient, userID string, oldGroup
 				op:        "remove",
 			})
 		}
+	}
+
+	// Fail closed: refuse to touch any group this call can't name from its own declared set.
+	// This should be unreachable given the allowlist-only callers above - it's a
+	// belt-and-suspenders guard against ever repeating the incident where undeclared real
+	// memberships got silently modified. Zero operations execute if this trips.
+	var undeclared []string
+	for _, op := range operations {
+		if op.groupName == "" {
+			undeclared = append(undeclared, op.groupID)
+		}
+	}
+	if len(undeclared) > 0 {
+		return fmt.Errorf("refusing to modify group(s) not present in the resource's own declared groups/ignore_groups: %v", undeclared)
 	}
 
 	if len(operations) == 0 {

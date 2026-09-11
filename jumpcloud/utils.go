@@ -194,9 +194,9 @@ func getUserGroupIDs(client *jcapiv2.APIClient, userID string) ([]string, error)
 
 		log.Printf("[DEBUG] getUserGroupIDs: Fetching groups for user %s (page %d)", userID, i+1)
 
-		// Get all user group associations for this user
-		associations, res, err := client.UsersApi.GraphUserAssociationsList(
-			context.TODO(), userID, "user_group", "", []string{}, optionals)
+		// Get all user groups this user is a member of
+		associations, res, err := client.UsersApi.GraphUserMemberOf(
+			context.TODO(), userID, "application/json", "application/json", optionals)
 		if err != nil {
 			// Check if user doesn't exist or has been deleted
 			if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "404") {
@@ -206,9 +206,9 @@ func getUserGroupIDs(client *jcapiv2.APIClient, userID string) ([]string, error)
 			return nil, fmt.Errorf("error getting user groups for user id %s, error:%s; response = %+v", userID, err, res)
 		}
 
-		for _, assoc := range associations {
-			if assoc.To.Id != "" {
-				groupIDs = append(groupIDs, assoc.To.Id)
+		for _, obj := range associations {
+			if obj.Id != "" {
+				groupIDs = append(groupIDs, obj.Id)
 			}
 		}
 
