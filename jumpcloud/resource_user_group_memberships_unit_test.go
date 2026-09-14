@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	jcapiv2 "github.com/TheJumpCloud/jcapi-go/v2"
@@ -507,4 +508,161 @@ func TestEmptyOperations(t *testing.T) {
 	}
 
 	t.Error("Should have detected empty operations")
+}
+
+// TestReadClearsStateOnDeletedUser is a regression test proving getUserGroupIDs's errUserNotFound
+// makes Read's not-found handling reachable again: when the user has been deleted, Read must
+// clear the resource from state instead of leaving it stuck showing 0 members forever.
+func TestReadClearsStateOnDeletedUser(t *testing.T) {
+	const userID = "deleted-user"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/usergroups" {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode([]jcapiv2.UserGroup{{Id: "id-a", Name: "a"}})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	cfg := jcapiv2.NewConfiguration()
+	cfg.BasePath = server.URL
+
+	d := schema.TestResourceDataRaw(t, resourceUserGroupMemberships().Schema, map[string]interface{}{
+		"user_email": "user@example.com",
+		"groups":     []interface{}{"a"},
+	})
+	d.SetId(userID)
+
+	if err := resourceUserGroupMembershipsRead(d, cfg); err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if d.Id() != "" {
+		t.Errorf("expected Read to clear the resource ID for a deleted user, got %q", d.Id())
+	}
+}
+
+// TestGroupLookupWorkerDoesNotRetryOn400 proves a permanent 4xx fails immediately instead of
+// burning maxRetries*backoff time retrying a request that will never succeed.
+func TestGroupLookupWorkerDoesNotRetryOn400(t *testing.T) {
+	var requests int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&requests, 1)
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer server.Close()
+
+	cfg := jcapiv2.NewConfiguration()
+	cfg.BasePath = server.URL
+	client := jcapiv2.NewAPIClient(cfg)
+
+	if _, err := lookupGroupsByName(client, []string{"a"}, true); err == nil {
+		t.Fatal("expected an error for a 400 response, got nil")
+	}
+	if got := atomic.LoadInt32(&requests); got != 1 {
+		t.Errorf("expected exactly 1 request (no retries on a permanent 4xx), got %d", got)
+	}
+}
+
+// TestGroupLookupWorkerRetriesOn500ThenSucceeds proves transient server errors are still retried.
+func TestGroupLookupWorkerRetriesOn500ThenSucceeds(t *testing.T) {
+	var requests int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&requests, 1) == 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]jcapiv2.UserGroup{{Id: "id-a", Name: "a"}})
+	}))
+	defer server.Close()
+
+	cfg := jcapiv2.NewConfiguration()
+	cfg.BasePath = server.URL
+	client := jcapiv2.NewAPIClient(cfg)
+
+	result, err := lookupGroupsByName(client, []string{"a"}, true)
+	if err != nil {
+		t.Fatalf("expected the retry to succeed, got error: %v", err)
+	}
+	if result["a"] != "id-a" {
+		t.Errorf("expected group 'a' to resolve to id-a, got %v", result)
+	}
+	if got := atomic.LoadInt32(&requests); got != 2 {
+		t.Errorf("expected exactly 2 requests (1 failure + 1 retry), got %d", got)
+	}
+}
+
+// TestGroupOperationWorkerDoesNotRetryOn400 proves a permanent 4xx on a membership mutation
+// fails immediately instead of retrying.
+func TestGroupOperationWorkerDoesNotRetryOn400(t *testing.T) {
+	var requests int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&requests, 1)
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer server.Close()
+
+	cfg := jcapiv2.NewConfiguration()
+	cfg.BasePath = server.URL
+	client := jcapiv2.NewAPIClient(cfg)
+
+	err := syncUserGroupsConcurrent(client, "user-1", []string{}, []string{"id-a"}, map[string]string{"a": "id-a"})
+	if err == nil {
+		t.Fatal("expected an error for a 400 response, got nil")
+	}
+	if got := atomic.LoadInt32(&requests); got != 1 {
+		t.Errorf("expected exactly 1 request (no retries on a permanent 4xx), got %d", got)
+	}
+}
+
+// TestGroupOperationWorkerRetriesOn500ThenSucceeds proves transient server errors are still
+// retried for membership mutations too.
+func TestGroupOperationWorkerRetriesOn500ThenSucceeds(t *testing.T) {
+	var requests int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&requests, 1) == 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	cfg := jcapiv2.NewConfiguration()
+	cfg.BasePath = server.URL
+	client := jcapiv2.NewAPIClient(cfg)
+
+	err := syncUserGroupsConcurrent(client, "user-1", []string{}, []string{"id-a"}, map[string]string{"a": "id-a"})
+	if err != nil {
+		t.Fatalf("expected the retry to succeed, got error: %v", err)
+	}
+	if got := atomic.LoadInt32(&requests); got != 2 {
+		t.Errorf("expected exactly 2 requests (1 failure + 1 retry), got %d", got)
+	}
+}
+
+// TestGroupOperationWorkerTreats404OnRemoveAsSuccess is a regression test for Delete's removed
+// string-matched "not found" fallback: a 404 removing a membership (group or user already gone)
+// must be treated as an already-satisfied removal, not a failure, and must not be retried.
+func TestGroupOperationWorkerTreats404OnRemoveAsSuccess(t *testing.T) {
+	var requests int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&requests, 1)
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	cfg := jcapiv2.NewConfiguration()
+	cfg.BasePath = server.URL
+	client := jcapiv2.NewAPIClient(cfg)
+
+	err := syncUserGroupsConcurrent(client, "user-1", []string{"id-a"}, []string{}, map[string]string{"a": "id-a"})
+	if err != nil {
+		t.Fatalf("expected a 404 on remove to be treated as success, got error: %v", err)
+	}
+	if got := atomic.LoadInt32(&requests); got != 1 {
+		t.Errorf("expected exactly 1 request (no retries on a 404), got %d", got)
+	}
 }
