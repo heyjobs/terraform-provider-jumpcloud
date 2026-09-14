@@ -2,8 +2,10 @@ package jumpcloud
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"sort"
 	"strings"
 	"sync"
@@ -13,6 +15,13 @@ import (
 	jcapiv2 "github.com/TheJumpCloud/jcapi-go/v2"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 )
+
+// isRetryableStatus reports whether an API failure is worth retrying: a network-level failure
+// (res is nil) or a rate-limit/server error. Any other 4xx (bad request, auth, permissions) is
+// permanent - retrying it just burns maxRetries*backoff time before surfacing the same error.
+func isRetryableStatus(res *http.Response) bool {
+	return res == nil || res.StatusCode == http.StatusTooManyRequests || res.StatusCode >= 500
+}
 
 const (
 	// maxConcurrentGroupOps is the maximum number of concurrent group membership operations
@@ -244,7 +253,7 @@ func groupLookupWorker(client *jcapiv2.APIClient, names <-chan string, results c
 				time.Sleep(backoff)
 			}
 
-			groups, _, err := client.UserGroupsApi.GroupsUserList(
+			groups, res, err := client.UserGroupsApi.GroupsUserList(
 				context.Background(),
 				"application/json",
 				"application/json",
@@ -257,6 +266,9 @@ func groupLookupWorker(client *jcapiv2.APIClient, names <-chan string, results c
 
 			if err != nil {
 				lastErr = err
+				if !isRetryableStatus(res) {
+					break
+				}
 				continue
 			}
 
@@ -362,8 +374,9 @@ func resourceUserGroupMembershipsRead(d *schema.ResourceData, m interface{}) err
 	// still actually in - never to discover or report on undeclared groups.
 	currentGroupIDs, err := getUserGroupIDs(clientv2, userID)
 	if err != nil {
-		// If user not found, remove from state
-		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "404") {
+		// If the user was deleted, remove this resource from state instead of leaving it
+		// stuck showing 0 members forever.
+		if errors.Is(err, errUserNotFound) {
 			d.SetId("")
 			return nil
 		}
@@ -481,12 +494,10 @@ func resourceUserGroupMembershipsDelete(d *schema.ResourceData, m interface{}) e
 		removeGroupIDs = append(removeGroupIDs, id)
 	}
 
+	// A 404 removing an already-gone membership (group or user deleted) is handled as a no-op
+	// success inside groupOperationWorker itself - idempotent destroy - so any error surfacing
+	// here is a genuine failure, not just "already gone" dressed up in string-matched wording.
 	if err := syncUserGroupsConcurrent(clientv2, userID, removeGroupIDs, []string{}, groupNameToID); err != nil {
-		// If the user is already gone, the memberships are already gone too - idempotent destroy.
-		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "404") {
-			d.SetId("")
-			return nil
-		}
 		return err
 	}
 
@@ -657,8 +668,17 @@ func groupOperationWorker(client *jcapiv2.APIClient, userID string, ops <-chan g
 				context.TODO(), op.groupID, "", "", req)
 
 			if err != nil {
+				// A 404 removing a membership means it's already gone (group or user deleted) -
+				// that's the desired end state, not a failure.
+				if op.op == "remove" && res != nil && res.StatusCode == http.StatusNotFound {
+					lastErr = nil
+					break
+				}
 				lastErr = fmt.Errorf("error %s user %s to/from group %s (%s): %s; response = %+v",
 					op.op, userID, op.groupName, op.groupID, err, res)
+				if !isRetryableStatus(res) {
+					break
+				}
 				continue
 			}
 

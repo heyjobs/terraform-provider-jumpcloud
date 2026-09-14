@@ -2,8 +2,10 @@ package jumpcloud
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"reflect"
 	"sort"
 	"strings"
@@ -15,13 +17,18 @@ import (
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 )
 
+// errUserNotFound indicates the JumpCloud user could not be found (e.g. already deleted).
+var errUserNotFound = errors.New("jumpcloud user not found")
+
 // Gets an application's metadata XML for SAML authentication
 // this direct API call is a needed workaround since JumpCloud does not offer this endpoint through its SDK
 func GetApplicationMetadataXml(orgId string, applicationId string, apiKey string) (string, error) {
 	url := "https://console.jumpcloud.com/api/organizations/" + orgId + "/applications/" + applicationId + "/metadata.xml"
 
-	// debug is always set to true, but output will only be shown if TF_LOG=DEBUG is set
-	client := resty.New().SetDebug(true)
+	// Debug mode is intentionally never enabled here: resty logs the full request including
+	// the x-api-key header, which would leak the API key to the log stream any time TF_LOG
+	// is set.
+	client := resty.New()
 
 	resp, err := client.R().
 		SetHeader("x-api-key", apiKey).
@@ -78,15 +85,14 @@ func getUserGroupMemberIDs(client *jcapiv2.APIClient, groupID string) ([]string,
 }
 
 func userIDsToEmails(configv2 *jcapiv2.Configuration, userIDs []string) ([]string, error) {
-	emails := make([]string, len(userIDs))
-
 	if len(userIDs) == 0 {
-		return emails, nil
+		return []string{}, nil
 	}
 
 	configv1 := convertV2toV1Config(configv2)
 	client := jcapiv1.NewAPIClient(configv1)
 
+	emails := make([]string, 0, len(userIDs))
 	for i := 0; ; i++ {
 		users, res, err := client.SystemusersApi.SystemusersList(context.TODO(), "", "", map[string]interface{}{
 			"filter": "_id:$in:" + strings.Join(userIDs[:], "|"),
@@ -100,8 +106,10 @@ func userIDsToEmails(configv2 *jcapiv2.Configuration, userIDs []string) ([]strin
 			return nil, fmt.Errorf("error loading user emails from IDs: %s, i:%d, error:%s; response:%+v", userIDs, i, err, res)
 		}
 
-		for j, result := range users.Results {
-			emails[j+(i*100)] = result.Email
+		// Appended rather than written at a computed index: a page returning more rows than
+		// expected must not panic with index out of range.
+		for _, result := range users.Results {
+			emails = append(emails, result.Email)
 		}
 
 		if len(users.Results) < 100 {
@@ -120,15 +128,14 @@ func userEmailsToIDs(configv2 *jcapiv2.Configuration, userEmailsInterface []inte
 		userEmails[i] = userEmail.(string)
 	}
 
-	ids := make([]string, len(userEmailsInterface))
-
 	if len(userEmails) == 0 {
-		return ids, nil
+		return []string{}, nil
 	}
 
 	configv1 := convertV2toV1Config(configv2)
 	client := jcapiv1.NewAPIClient(configv1)
 
+	ids := make([]string, 0, len(userEmails))
 	for i := 0; ; i++ {
 		users, res, err := client.SystemusersApi.SystemusersList(context.TODO(), "", "", map[string]interface{}{
 			"filter": "email:$in:" + strings.Join(userEmails[:], "|"),
@@ -142,8 +149,10 @@ func userEmailsToIDs(configv2 *jcapiv2.Configuration, userEmailsInterface []inte
 			return nil, fmt.Errorf("error loading user IDs from emails:%s; response = %+v", err, res)
 		}
 
-		for j, result := range users.Results {
-			ids[j+(i*100)] = result.Id
+		// Appended rather than written at a computed index: a page returning more rows than
+		// expected must not panic with index out of range.
+		for _, result := range users.Results {
+			ids = append(ids, result.Id)
 		}
 
 		if len(users.Results) < 100 {
@@ -198,10 +207,11 @@ func getUserGroupIDs(client *jcapiv2.APIClient, userID string) ([]string, error)
 		associations, res, err := client.UsersApi.GraphUserMemberOf(
 			context.TODO(), userID, "application/json", "application/json", optionals)
 		if err != nil {
-			// Check if user doesn't exist or has been deleted
-			if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "404") {
-				log.Printf("[WARN] getUserGroupIDs: User %s not found, returning empty group list", userID)
-				return []string{}, nil
+			// Distinguish "user was deleted" from every other failure via the actual status
+			// code, so callers (e.g. Read) can tell "zero group memberships" apart from
+			// "this user doesn't exist" and clean up state instead of showing 0 members forever.
+			if res != nil && res.StatusCode == http.StatusNotFound {
+				return nil, fmt.Errorf("user %s: %w", userID, errUserNotFound)
 			}
 			return nil, fmt.Errorf("error getting user groups for user id %s, error:%s; response = %+v", userID, err, res)
 		}
